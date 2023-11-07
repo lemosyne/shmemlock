@@ -1,3 +1,5 @@
+#![feature(negative_impls)]
+
 use std::{
     cell::UnsafeCell,
     mem::MaybeUninit,
@@ -9,6 +11,7 @@ use std::{
 use libc::{
     pthread_mutex_destroy, pthread_mutex_init, pthread_mutex_lock, pthread_mutex_t,
     pthread_mutex_unlock, pthread_mutexattr_init, pthread_mutexattr_setpshared, pthread_self,
+    PTHREAD_PROCESS_SHARED,
 };
 
 /// This basically just provides a way to check if the
@@ -71,9 +74,11 @@ impl<'a, T> Drop for ReentrantSharedMutexGuard<'a, T> {
 }
 
 pub struct SharedMutex<T> {
-    pmutex: pthread_mutex_t,
+    pmutex: pthread_mutex_t, // perhaps this too should be in an unsafe cell
     inner: UnsafeCell<T>,
 }
+
+unsafe impl<T> Sync for SharedMutex<T> {}
 
 impl<T> SharedMutex<T> {
     pub fn new(inner: T) -> Self {
@@ -82,7 +87,10 @@ impl<T> SharedMutex<T> {
             assert_eq!(pthread_mutexattr_init(attr.as_mut_ptr()), 0);
 
             let mut attr = attr.assume_init();
-            assert_eq!(pthread_mutexattr_setpshared(addr_of_mut!(attr), 1), 0);
+            assert_eq!(
+                pthread_mutexattr_setpshared(addr_of_mut!(attr), PTHREAD_PROCESS_SHARED),
+                0
+            );
 
             let mut pmutex = MaybeUninit::uninit();
             assert_eq!(pthread_mutex_init(pmutex.as_mut_ptr(), addr_of!(attr)), 0);
@@ -113,6 +121,8 @@ impl<T> Drop for SharedMutex<T> {
 }
 
 pub struct SharedMutexGuard<'a, T>(&'a SharedMutex<T>);
+
+impl<'a, T> !Send for SharedMutexGuard<'a, T> {}
 
 impl<'a, T> Deref for SharedMutexGuard<'a, T> {
     type Target = T;
