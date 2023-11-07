@@ -33,14 +33,16 @@ impl<T> ReentrantSharedMutex<T> {
     }
 
     pub fn lock(&self) -> ReentrantSharedMutexGuard<'_, T> {
-        let guard = if self.guard_count.fetch_add(1, Ordering::SeqCst) == 1 {
+        let guard = if self.reentrant() {
+            unsafe { self.mutex.guard_unchecked() }
+        } else {
             let guard = self.mutex.lock();
             self.tid.store(unsafe { pthread_self() }, Ordering::SeqCst);
 
             ManuallyDrop::new(guard)
-        } else {
-            unsafe { self.mutex.guard_unchecked() }
         };
+
+        self.guard_count.fetch_add(1, Ordering::SeqCst);
 
         ReentrantSharedMutexGuard {
             tid: &self.tid,
