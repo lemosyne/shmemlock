@@ -72,8 +72,9 @@ impl<'a, T> Deref for ReentrantSharedMutexGuard<'a, T> {
 
 impl<'a, T> Drop for ReentrantSharedMutexGuard<'a, T> {
     fn drop(&mut self) {
-        self.tid.store(0, Ordering::SeqCst);
-        if self.guard_count.fetch_sub(1, Ordering::SeqCst) == 0 {
+        if self.guard_count.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.tid.store(0, Ordering::SeqCst);
+
             unsafe { drop(ManuallyDrop::take(&mut self.inner)) };
         }
     }
