@@ -2,10 +2,10 @@
 
 use std::{
     cell::UnsafeCell,
-    mem::MaybeUninit,
+    mem::{ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
     ptr::{addr_of, addr_of_mut},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 use libc::{
@@ -14,12 +14,10 @@ use libc::{
     PTHREAD_PROCESS_SHARED,
 };
 
-/// This basically just provides a way to check if the
-/// current thread has this mutex locked, but it won't stop
-/// you from deadlocking if you try to actually relock the mutex.
-/// Also, the check might not work in signal handlers/interrupts.
+/// This might not work in signal handlers/interrupts.
 pub struct ReentrantSharedMutex<T> {
     mutex: SharedMutex<T>,
+    guard_count: AtomicUsize,
 
     // We assume that a thread id of 0 is impossible.
     tid: AtomicU64,
@@ -29,16 +27,24 @@ impl<T> ReentrantSharedMutex<T> {
     pub fn new(inner: T) -> Self {
         Self {
             mutex: SharedMutex::new(inner),
+            guard_count: AtomicUsize::new(0),
             tid: AtomicU64::new(0),
         }
     }
 
     pub fn lock(&self) -> ReentrantSharedMutexGuard<'_, T> {
-        let guard = self.mutex.lock();
-        self.tid.store(unsafe { pthread_self() }, Ordering::SeqCst);
+        let guard = if self.guard_count.fetch_add(1, Ordering::SeqCst) == 1 {
+            let guard = self.mutex.lock();
+            self.tid.store(unsafe { pthread_self() }, Ordering::SeqCst);
+
+            ManuallyDrop::new(guard)
+        } else {
+            unsafe { self.mutex.guard_unchecked() }
+        };
 
         ReentrantSharedMutexGuard {
             tid: &self.tid,
+            guard_count: &self.guard_count,
             inner: guard,
         }
     }
@@ -50,7 +56,8 @@ impl<T> ReentrantSharedMutex<T> {
 
 pub struct ReentrantSharedMutexGuard<'a, T> {
     tid: &'a AtomicU64,
-    inner: SharedMutexGuard<'a, T>,
+    guard_count: &'a AtomicUsize,
+    inner: ManuallyDrop<SharedMutexGuard<'a, T>>,
 }
 
 impl<'a, T> Deref for ReentrantSharedMutexGuard<'a, T> {
@@ -61,15 +68,12 @@ impl<'a, T> Deref for ReentrantSharedMutexGuard<'a, T> {
     }
 }
 
-impl<'a, T> DerefMut for ReentrantSharedMutexGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.inner.deref_mut()
-    }
-}
-
 impl<'a, T> Drop for ReentrantSharedMutexGuard<'a, T> {
     fn drop(&mut self) {
-        self.tid.store(0, Ordering::SeqCst)
+        self.tid.store(0, Ordering::SeqCst);
+        if self.guard_count.fetch_sub(1, Ordering::SeqCst) == 0 {
+            unsafe { drop(ManuallyDrop::take(&mut self.inner)) };
+        }
     }
 }
 
@@ -109,6 +113,10 @@ impl<T> SharedMutex<T> {
             assert_eq!(pthread_mutex_lock(addr_of!(self.pmutex) as *mut _), 0);
             SharedMutexGuard(&self)
         }
+    }
+
+    unsafe fn guard_unchecked(&self) -> ManuallyDrop<SharedMutexGuard<'_, T>> {
+        ManuallyDrop::new(SharedMutexGuard(&self))
     }
 }
 
