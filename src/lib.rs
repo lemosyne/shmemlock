@@ -20,7 +20,7 @@ pub struct ReentrantSharedMutex<T> {
     guard_count: AtomicUsize,
 
     // We assume that a thread id of 0 is impossible.
-    tid: AtomicU64,
+    pub tid: AtomicU64,
 }
 
 impl<T> ReentrantSharedMutex<T> {
